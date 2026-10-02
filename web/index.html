@@ -16,11 +16,43 @@
             <select id="filter-tag" aria-label="Filter by tag"><option value="">All tags</option></select>
             <label class="toggle"><input id="show-archived" type="checkbox"> Archived</label>
         </div>
+        <button id="attention" class="attention" hidden title="Agents that need you"></button>
+        <button id="sessions-btn" title="Agent sessions">Sessions <span id="sessions-count" class="count-badge"></span></button>
         <button id="new-task" class="primary" title="New task (n)">New task</button>
         <span id="live" class="live" title="Live updates"></span>
     </header>
 
-    <main id="board" class="board" aria-label="Board"></main>
+    <div id="sessions-pop" class="popover" hidden>
+        <div class="popover-head">
+            <strong>Sessions</strong>
+            <label class="toggle"><input id="notify" type="checkbox"> Notify me when an agent needs input</label>
+        </div>
+        <ol id="sessions-list" class="sessions-list"></ol>
+        <p id="sessions-orphans" class="hint" hidden></p>
+    </div>
+
+    <div class="workspace">
+        <main id="board" class="board" aria-label="Board"></main>
+
+        <section id="dock" class="dock" aria-label="Orchestrator">
+            <div id="dock-handle" class="dock-handle" title="Drag to resize"></div>
+            <div class="dock-head">
+                <button id="dock-toggle" class="icon" title="Show or hide the orchestrator (Ctrl+`)" aria-expanded="true">▾</button>
+                <strong>Orchestrator</strong>
+                <span id="dock-status"></span>
+                <span class="spacer"></span>
+                <select id="dock-profile" aria-label="Tool for the orchestrator"></select>
+                <button id="dock-start" class="primary">Start</button>
+                <button id="dock-resume">Resume</button>
+                <button id="dock-nudge" title="Remind it to check its inbox">Nudge</button>
+                <button id="dock-stop" class="danger">Stop</button>
+            </div>
+            <div id="dock-body" class="dock-body">
+                <div id="dock-term" class="term-host"></div>
+                <div id="dock-empty" class="term-empty"></div>
+            </div>
+        </section>
+    </div>
 
     <aside id="drawer" class="drawer" hidden aria-label="Task">
         <div class="drawer-head">
@@ -29,6 +61,7 @@
             <button id="d-close" class="icon" title="Close (Esc)" aria-label="Close">&times;</button>
         </div>
         <div id="d-conflict" class="banner" hidden></div>
+        <div id="d-changed" class="banner info" hidden>You changed this task while its agent holds it. The agent has been told and has not read it yet.</div>
         <div class="meta">
             <label>Status <select id="d-status"></select></label>
             <label>Priority <select id="d-priority"></select></label>
@@ -38,11 +71,13 @@
         </div>
         <div class="file-row">
             <code id="d-path"></code>
+            <span id="d-claim" class="claim"></span>
             <button id="d-open" title="Open the markdown file (set KANBAN_OPEN to choose the program)">Open file</button>
         </div>
         <div class="tabs" role="tablist">
             <button role="tab" data-tab="preview" aria-selected="true">Preview</button>
             <button role="tab" data-tab="edit" aria-selected="false">Edit</button>
+            <button role="tab" data-tab="agent" aria-selected="false">Agent <span id="d-agent-dot"></span></button>
             <span class="spacer"></span>
             <span id="d-progress" class="progress-label"></span>
         </div>
@@ -55,6 +90,28 @@
                 <button id="d-save" class="primary">Save</button>
             </div>
         </div>
+        <div id="d-agent" class="agent-pane" hidden>
+            <div class="agent-head">
+                <span id="d-agent-status"></span>
+                <span class="spacer"></span>
+                <select id="d-agent-profile" aria-label="Tool to run"></select>
+                <button id="d-agent-start" class="primary">Start agent</button>
+                <button id="d-agent-resume">Resume</button>
+                <button id="d-agent-nudge" title="Remind it to check its inbox">Nudge</button>
+                <button id="d-agent-stop" class="danger">Stop</button>
+            </div>
+            <div id="d-agent-info" class="agent-info"></div>
+            <div id="d-term" class="term-host"></div>
+            <div id="d-agent-empty" class="term-empty"></div>
+        </div>
+        <details id="d-activity-box" class="history activity" open>
+            <summary>Activity</summary>
+            <ol id="d-activity"></ol>
+            <form id="d-msg-form" class="msg-form">
+                <input id="d-msg" placeholder="A note or instruction for this task's agent" aria-label="Message">
+                <button class="primary">Post</button>
+            </form>
+        </details>
         <details class="history">
             <summary>History</summary>
             <ol id="d-history"></ol>
@@ -69,6 +126,7 @@
     <div id="toast" class="toast" role="status" hidden></div>
 
     <script src="markdown.js"></script>
+    <script src="term.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

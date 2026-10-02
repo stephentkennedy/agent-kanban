@@ -1,0 +1,3 @@
+#!/bin/sh
+# Runs this tracker's kanban, whatever the current directory. Agent sessions get this folder on their PATH.
+exec node "$(dirname "$0")/../kanban.js" "$@"

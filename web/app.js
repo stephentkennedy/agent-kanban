@@ -11,15 +11,23 @@
         tab: 'preview',
         dirty: false,       // the editor holds unsaved text
         dragId: null,
+        caps: null,         // what the server can do: tmux, terminals, profiles
+        activity: [],       // the open task's events
+        taskTerm: null,     // the drawer's terminal, attached to the open task's session
+        dockTerm: null,     // the orchestrator's terminal
     };
+
+    const LIVE = s => !!s && s.status !== 'exited' && s.status !== 'lost';
 
     /* ---------- API ---------- */
 
+    // Writes are always JSON: the server refuses anything else, so another site cannot post a form to it.
     async function api(method, url, body) {
+        const write = method !== 'GET';
         const res = await fetch(url, {
             method,
-            headers: body ? { 'Content-Type': 'application/json' } : {},
-            body: body ? JSON.stringify(body) : undefined,
+            headers: write ? { 'Content-Type': 'application/json' } : {},
+            body: write ? JSON.stringify(body || {}) : undefined,
         });
         const data = await res.json().catch(() => null);
         if (!res.ok) {
@@ -31,13 +39,14 @@
     }
 
     let toastTimer;
-    function toast(message, isError) {
+    function toast(message, isError, onClick) {
         const el = $('#toast');
         el.textContent = message;
-        el.className = 'toast' + (isError ? ' error' : '');
+        el.className = 'toast' + (isError ? ' error' : '') + (onClick ? ' action' : '');
+        el.onclick = onClick ? () => { el.hidden = true; onClick(); } : null;
         el.hidden = false;
         clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => { el.hidden = true; }, isError ? 5000 : 2500);
+        toastTimer = setTimeout(() => { el.hidden = true; }, onClick ? 10000 : isError ? 5000 : 2500);
     }
 
     const fail = e => toast(e.message, true);
@@ -48,6 +57,7 @@
         state.board = await api('GET', '/api/board');
         fillFilterOptions();
         renderBoard();
+        renderSessions();
     }
 
     function visible(t) {
@@ -71,8 +81,9 @@
         const scroll = [...board.querySelectorAll('.cards')].map(el => el.scrollTop);
         board.innerHTML = '';
         columns.forEach((col, i) => {
-            const mine = tasks.filter(t => t.status === col.key && visible(t));
+            const mine = ordered(col, tasks.filter(t => t.status === col.key && visible(t)));
             const over = col.wip_limit && col.count > col.wip_limit;
+            const attention = col.sort === 'attention';
             const el = document.createElement('section');
             el.className = `column ${col.kind}`;
             el.dataset.status = col.key;
@@ -81,6 +92,8 @@
                     <h2>${esc(col.label)}</h2>
                     <span class="count${over ? ' over' : ''}" title="${col.wip_limit ? `Work-in-progress limit ${col.wip_limit}` : ''}">${col.count}${col.wip_limit ? ' / ' + col.wip_limit : ''}</span>
                     <span class="kind">${esc(col.key)}</span>
+                    <button type="button" class="sort-toggle${attention ? ' on' : ''}" aria-pressed="${attention}"
+                        title="${attention ? 'Agents that need you are at the top. Click for your own order.' : 'Click to float agents that need you to the top.'}">⇡</button>
                 </div>
                 <div class="cards"></div>
                 <div class="add-row"><button type="button">+ Add task</button></div>`;
@@ -89,13 +102,56 @@
             list.scrollTop = scroll[i] || 0;
             wireDrop(list, col.key);
             el.querySelector('.add-row button').addEventListener('click', () => quickAdd(el, col.key));
+            el.querySelector('.sort-toggle').addEventListener('click', () => {
+                api('PATCH', `/api/columns/${encodeURIComponent(col.key)}`, { sort: attention ? 'manual' : 'attention' })
+                    .then(loadBoard).catch(fail);
+            });
             board.appendChild(el);
         });
     }
 
+    // A column sorted by attention shows tasks whose agent needs the user first (blocked, then finished, then
+    // crashed; longest-waiting first), then the rest in the column's own order.
+    function pinned(col, t) {
+        return col.sort === 'attention' && t.session && t.session.attention > 0;
+    }
+
+    function ordered(col, list) {
+        const top = list.filter(t => pinned(col, t)).sort((a, b) =>
+            a.session.attention - b.session.attention
+            || String(a.session.attention_since).localeCompare(String(b.session.attention_since)));
+        return [...top, ...list.filter(t => !pinned(col, t))];
+    }
+
+    function ago(iso) {
+        if (!iso) return '';
+        const m = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
+        return m < 1 ? 'now' : m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
+    }
+
+    function statusLabel(s) {
+        switch (s.status) {
+            case 'busy': return 'Working';
+            case 'idle': return `Idle ${ago(s.attention_since)}`.trim();
+            case 'waiting': return 'Needs input';
+            case 'starting': return 'Starting';
+            case 'lost': return 'Lost';
+            case 'exited': return s.exit_code ? `Exited (${s.exit_code})` : 'Stopped';
+            default: return s.status;
+        }
+    }
+
+    function statusTag(s, { name = false } = {}) {
+        const tip = [s.name, s.status_reason].filter(Boolean).join(': ');
+        return `<span class="agent-tag" data-status="${esc(s.status)}" data-attention="${s.attention}" title="${esc(tip)}">`
+            + `<i></i>${esc(statusLabel(s))}${name ? ` <b>${esc(s.name)}</b>` : ''}</span>`;
+    }
+
     function card(t) {
+        const col = state.board.columns.find(c => c.key === t.status);
         const el = document.createElement('article');
-        el.className = 'card' + (t.archived ? ' archived' : '') + (state.task && state.task.id === t.id ? ' selected' : '');
+        el.className = 'card' + (t.archived ? ' archived' : '') + (state.task && state.task.id === t.id ? ' selected' : '')
+            + (col && pinned(col, t) ? ' pinned' : '');
         el.draggable = true;
         el.tabIndex = 0;
         el.dataset.id = t.id;
@@ -109,6 +165,11 @@
                 ${prio ? `<span class="prio" data-priority="${t.priority}" title="${t.priority} priority">${prio}</span>` : ''}
             </div>
             <div class="card-title">${markdown.inline(t.title)}</div>
+            ${t.session || t.claim || t.user_changed_unseen ? `<div class="card-agent">
+                ${t.session ? statusTag(t.session) : ''}
+                ${t.claim && !t.claim.actor.startsWith('agent:') ? `<span class="claim" title="Claimed">${esc(t.claim.actor)}</span>` : ''}
+                ${t.user_changed_unseen ? '<span class="changed" title="You changed this task; its agent has not read that yet">changed</span>' : ''}
+            </div>` : ''}
             ${t.tags.length || t.checks_total || t.archived ? `<div class="card-foot">
                 ${t.tags.map(g => `<button type="button" class="tag" data-tag="${esc(g)}" title="Show only #${esc(g)}">${esc(g)}</button>`).join('')}
                 ${t.archived ? '<span class="flag">archived</span>' : ''}
@@ -168,7 +229,10 @@
             e.preventDefault();
             const id = state.dragId;
             if (id == null) return;
-            const before = cardAfter(list, e.clientY);
+            // Pinned cards are ordered by attention, not by hand: a drop among them lands before the first
+            // card in the column's own order.
+            let before = cardAfter(list, e.clientY);
+            if (before && before.classList.contains('pinned')) before = list.querySelector('.card:not(.pinned):not(.dragging)');
             moveTask(id, status, before ? Number(before.dataset.id) : null);
         });
     }
@@ -267,8 +331,10 @@
             return fail(e);
         }
         state.dirty = false;
+        state.activity = [];
         history.replaceState(null, '', `#${id}`);
         renderDrawer();
+        loadActivity();
         document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
         const el = document.querySelector(`.card[data-id="${id}"]`);
         if (el) el.classList.add('selected');
@@ -278,7 +344,9 @@
         if (state.dirty && !confirm('Discard unsaved edits?')) return;
         state.task = null;
         state.dirty = false;
+        if (state.taskTerm) state.taskTerm.dispose();
         $('#drawer').hidden = true;
+        $('#drawer').classList.remove('wide');
         history.replaceState(null, '', location.pathname);
         document.querySelectorAll('.card.selected').forEach(el => el.classList.remove('selected'));
     }
@@ -339,6 +407,9 @@
         $('#d-priority').innerHTML = options([...b.priorities].reverse(), t.priority);
         $('#d-type').innerHTML = options(b.types, t.type);
         if (document.activeElement !== $('#d-tags')) $('#d-tags').value = t.tags.join(', ');
+        $('#d-claim').textContent = t.claim ? `held by ${t.claim.actor}` : '';
+        $('#d-changed').hidden = !t.user_changed_unseen;
+        $('#d-agent-dot').innerHTML = t.session && LIVE(t.session) ? `<i class="dot" data-status="${esc(t.session.status)}"></i>` : '';
         $('#d-path').textContent = `tasks/${t.file}`;
         $('#d-path').title = `${t.path}\nClick to copy`;
         $('#d-progress').textContent = t.checks_total ? `${t.checks_done} of ${t.checks_total} checked` : '';
@@ -362,9 +433,10 @@
                 ? (h.old ? `moved from ${labels[h.old] || h.old} to ${labels[h.new] || h.new}` : `created in ${labels[h.new] || h.new}`)
                 : h.field === 'file' ? `file renamed from ${h.old} to ${h.new}`
                 : `${h.field}: ${h.old || '—'} → ${h.new || '—'}`;
-            return `<li><time>${esc(fmt(h.at))}</time>${esc(what)}</li>`;
+            return `<li><time>${esc(fmt(h.at))}</time>${esc(what)}${h.actor ? ` <span class="actor">${esc(h.actor)}</span>` : ''}</li>`;
         }).join('');
         setTab(state.tab);
+        renderActivity();
     }
 
     function setTab(tab) {
@@ -372,7 +444,10 @@
         document.querySelectorAll('.tabs [data-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
         $('#d-preview').hidden = tab !== 'preview';
         $('#d-edit').hidden = tab !== 'edit';
+        $('#d-agent').hidden = tab !== 'agent';
+        $('#drawer').classList.toggle('wide', tab === 'agent');
         if (tab === 'edit') $('#d-body').focus();
+        renderAgent();
     }
 
     async function patch(changes) {
@@ -395,6 +470,198 @@
                 const fresh = await api('GET', `/api/tasks/${t.id}`);
                 showConflict(fresh);
             } else fail(e);
+        }
+    }
+
+    /* ---------- activity ---------- */
+
+    async function loadActivity() {
+        const t = state.task;
+        if (!t) return;
+        try {
+            const events = await api('GET', `/api/tasks/${t.id}/events?limit=100`);
+            if (state.task && state.task.id === t.id) {
+                state.activity = events;
+                renderActivity();
+            }
+        } catch { /* the drawer still works without it */ }
+    }
+
+    // Everything but reorders, newest first; notes and messages stand out.
+    function renderActivity() {
+        const fmt = iso => new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+        $('#d-activity').innerHTML = state.activity.filter(e => e.type !== 'task.reordered').slice().reverse().map(e => `
+            <li class="${e.type.startsWith('message.') ? 'message' : ''}${e.type === 'session.waiting' ? ' alert' : ''}">
+                <time>${esc(fmt(e.at))}</time><span class="actor">${esc(e.actor)}</span> ${esc(e.text || e.type)}
+            </li>`).join('') || '<li class="hint">Nothing yet.</li>';
+    }
+
+    /* ---------- agents ---------- */
+
+    function sessionsOf(role) {
+        return (state.board ? state.board.sessions : []).filter(s => s.role === role);
+    }
+
+    // The orchestrator session to show: the live one, or else the latest.
+    function orchestrator() {
+        const list = sessionsOf('orchestrator');
+        return list.find(LIVE) || list[list.length - 1] || null;
+    }
+
+    function capsProblem() {
+        const c = state.caps;
+        if (!c) return 'Checking what this server can run…';
+        if (!c.tmux) return 'Agent sessions need tmux 3.2 or later on the machine running the board.';
+        if (!c.tmuxOk) return `Agent sessions need tmux 3.2 or later; this is ${c.tmux}.`;
+        if (!c.terminals) return 'Terminals in the browser need the optional packages: run npm install in the kanban folder. Sessions still run; attach with kanban session attach.';
+        return null;
+    }
+
+    async function startSession(body) {
+        try {
+            const s = await api('POST', '/api/sessions', body);
+            toast(`Started ${s.name}`);
+            await loadBoard();
+            return s;
+        } catch (e) { fail(e); }
+    }
+
+    async function sessionAction(s, action, body) {
+        try {
+            await api('POST', `/api/sessions/${s.id}/${action}`, body);
+        } catch (e) {
+            fail(e);
+            return false;
+        }
+        await loadBoard().catch(fail);
+        if (state.task) await refreshTask();
+        return true;
+    }
+
+    function stopSession(s) {
+        if (!confirm(`Stop ${s.name}? Its worktree and branch are kept.`)) return;
+        sessionAction(s, 'kill', { worktree: 'keep' });
+    }
+
+    // The drawer's Agent tab: start an agent on the task, or watch and drive the one that is there.
+    function renderAgent() {
+        const t = state.task;
+        if (!t || state.tab !== 'agent') {
+            if (state.taskTerm && state.tab !== 'agent') state.taskTerm.dispose();
+            return;
+        }
+        const s = t.session;
+        const problem = capsProblem();
+        const live = LIVE(s);
+        $('#d-agent-status').innerHTML = s ? statusTag(s, { name: true }) : '<span class="hint">No agent has worked on this task.</span>';
+        $('#d-agent-profile').hidden = live;
+        $('#d-agent-start').hidden = live;
+        $('#d-agent-start').textContent = s ? 'Start a new agent' : 'Start agent';
+        $('#d-agent-start').disabled = !!problem && !(state.caps && state.caps.tmuxOk);
+        $('#d-agent-resume').hidden = !s || live;
+        $('#d-agent-nudge').hidden = !live;
+        $('#d-agent-stop').hidden = !live;
+        $('#d-agent-info').innerHTML = s ? [
+            s.status_reason ? `<span class="reason">${esc(s.status_reason)}</span>` : '',
+            s.branch ? `<span>branch <code>${esc(s.branch)}</code></span>` : '',
+            s.worktree ? `<span>worktree <code class="copy" data-copy="${esc(s.worktree)}" title="Click to copy">${esc(s.worktree)}</code></span>` : '',
+        ].filter(Boolean).join('') : '';
+
+        const canView = s && s.status !== 'lost' && state.caps && state.caps.terminals;
+        $('#d-agent-empty').hidden = !!canView;
+        $('#d-agent-empty').textContent = problem || (s ? (s.status === 'lost' ? 'This session\'s terminal is gone. Resume it, or start a new agent.' : '')
+            : 'Start an agent to work on this task in its own git worktree and branch. It follows the task\'s events, and you can type into its terminal here.');
+        $('#d-term').hidden = !canView;
+        if (!canView) {
+            if (state.taskTerm) state.taskTerm.dispose();
+            return;
+        }
+        state.taskTerm = state.taskTerm || new window.KanbanTerm.Term($('#d-term'));
+        state.taskTerm.open(s.id).catch(fail);
+    }
+
+    // The orchestrator dock at the bottom of the board.
+    function renderDock() {
+        const s = orchestrator();
+        const live = LIVE(s);
+        const problem = capsProblem();
+        $('#dock-status').innerHTML = s ? statusTag(s) : '';
+        $('#dock-profile').hidden = live;
+        $('#dock-start').hidden = live;
+        $('#dock-start').disabled = !(state.caps && state.caps.tmuxOk);
+        $('#dock-resume').hidden = !s || live;
+        $('#dock-nudge').hidden = !live;
+        $('#dock-stop').hidden = !live;
+        const open = !$('#dock').classList.contains('collapsed');
+        const canView = s && s.status !== 'lost' && state.caps && state.caps.terminals;
+        $('#dock-empty').hidden = !!canView;
+        $('#dock-empty').textContent = problem || 'The orchestrator is an agent that plans the board, starts agents on tasks and answers them. Start one to talk to it here.';
+        $('#dock-term').hidden = !canView;
+        if (!canView || !open) {
+            if (state.dockTerm) state.dockTerm.dispose();
+            return;
+        }
+        state.dockTerm = state.dockTerm || new window.KanbanTerm.Term($('#dock-term'));
+        state.dockTerm.open(s.id).catch(fail);
+    }
+
+    function toggleDock(force) {
+        const collapsed = force !== undefined ? !force : !$('#dock').classList.contains('collapsed');
+        $('#dock').classList.toggle('collapsed', collapsed);
+        $('#dock-toggle').textContent = collapsed ? '▸' : '▾';
+        $('#dock-toggle').setAttribute('aria-expanded', String(!collapsed));
+        store('dock-collapsed', collapsed ? '1' : '');
+        renderDock();
+        if (!collapsed && state.dockTerm) setTimeout(() => state.dockTerm.focus(), 50);
+    }
+
+    function store(key, value) {
+        try {
+            if (value === undefined) return localStorage.getItem(`kanban.${key}`);
+            localStorage.setItem(`kanban.${key}`, value);
+        } catch { return null; }
+    }
+
+    // The top bar: how many agents need the user, and the list of every session.
+    function renderSessions() {
+        if (!state.board) return;
+        const all = state.board.sessions;
+        const live = all.filter(LIVE);
+        // An ended session stops counting once a newer one has taken over its task (or the orchestrator's role).
+        const superseded = s => all.some(o => o.id > s.id && o.role === s.role && o.task_id === s.task_id);
+        const needy = all.filter(s => s.attention > 0 && !superseded(s));
+        $('#sessions-count').textContent = live.length || '';
+        $('#attention').hidden = !needy.length;
+        $('#attention').textContent = `${needy.length} need${needy.length === 1 ? 's' : ''} you`;
+        document.title = needy.length ? `(${needy.length}) Kanban` : 'Kanban';
+        const order = (a, b) => (a.attention || 9) - (b.attention || 9) || (LIVE(b) - LIVE(a)) || b.id - a.id;
+        $('#sessions-list').innerHTML = all.slice().sort(order).map(s => `
+            <li data-id="${s.id}">
+                ${statusTag(s)}
+                <b>${esc(s.name)}</b>
+                <span class="hint">${s.task_id != null ? `#${s.task_id}` : 'orchestrator'} · ${esc(s.profile)}${s.status_reason ? ' · ' + esc(s.status_reason) : ''}</span>
+                <span class="spacer"></span>
+                <button type="button" data-a="open">Open</button>
+            </li>`).join('') || '<li class="hint">No sessions yet. Start the orchestrator below, or an agent from a task\'s Agent tab.</li>';
+        renderDock();
+        if (state.tab === 'agent') renderAgent();
+    }
+
+    function showSession(s) {
+        $('#sessions-pop').hidden = true;
+        if (s.role === 'orchestrator') return toggleDock(true);
+        if (s.task_id == null) return;
+        state.tab = 'agent';
+        openTask(s.task_id);
+    }
+
+    function announceWaiting(e) {
+        const s = { id: e.session_id, name: e.payload.name, role: e.payload.role, task_id: e.task_id };
+        const text = `${e.payload.name} needs input${e.payload.reason ? ': ' + e.payload.reason : ''}`;
+        toast(text, false, () => showSession(s));
+        if ($('#notify').checked && window.Notification && Notification.permission === 'granted' && document.hidden) {
+            const n = new Notification('Kanban', { body: text, tag: `session-${e.session_id}` });
+            n.onclick = () => { window.focus(); showSession(s); };
         }
     }
 
@@ -478,6 +745,11 @@
     });
 
     document.addEventListener('keydown', e => {
+        if (e.ctrlKey && e.key === '`') {
+            e.preventDefault();
+            return toggleDock();
+        }
+        if (e.target.closest('.xterm')) return; // a terminal gets every key, Escape included
         const typing = e.target.matches('input, textarea, select');
         if ((e.ctrlKey || e.metaKey) && e.key === 's' && state.task && state.tab === 'edit') {
             e.preventDefault();
@@ -494,18 +766,123 @@
 
     window.addEventListener('beforeunload', e => { if (state.dirty) e.preventDefault(); });
 
-    // Live updates: the server says something changed, and the board and the open task are re-read.
-    let pending = null;
+    // Agents: the drawer's Agent tab, the activity feed, the orchestrator dock and the sessions list.
+    $('#d-agent-start').addEventListener('click', async () => {
+        const t = state.task;
+        const s = await startSession({ role: 'task', task: t.id, profile: $('#d-agent-profile').value, force: LIVE(t.session) });
+        if (s) refreshTask();
+    });
+    $('#d-agent-resume').addEventListener('click', () => sessionAction(state.task.session, 'resume'));
+    $('#d-agent-nudge').addEventListener('click', async () => { if (await sessionAction(state.task.session, 'nudge')) toast('Nudged'); });
+    $('#d-agent-stop').addEventListener('click', () => stopSession(state.task.session));
+    $('#d-agent-info').addEventListener('click', e => {
+        const el = e.target.closest('[data-copy]');
+        if (el) navigator.clipboard.writeText(el.dataset.copy).then(() => toast('Path copied'), fail);
+    });
+    $('#d-msg-form').addEventListener('submit', async e => {
+        e.preventDefault();
+        const text = $('#d-msg').value.trim();
+        if (!text || !state.task) return;
+        try {
+            await api('POST', `/api/tasks/${state.task.id}/messages`, { text });
+            $('#d-msg').value = '';
+            loadActivity();
+        } catch (err) { fail(err); }
+    });
+
+    $('#dock-toggle').addEventListener('click', () => toggleDock());
+    $('#dock-start').addEventListener('click', () => startSession({ role: 'orchestrator', profile: $('#dock-profile').value }));
+    $('#dock-resume').addEventListener('click', () => sessionAction(orchestrator(), 'resume'));
+    $('#dock-nudge').addEventListener('click', async () => { if (await sessionAction(orchestrator(), 'nudge')) toast('Nudged'); });
+    $('#dock-stop').addEventListener('click', () => stopSession(orchestrator()));
+    $('#dock-handle').addEventListener('pointerdown', e => {
+        e.preventDefault();
+        const dock = $('#dock');
+        const start = e.clientY, height = dock.getBoundingClientRect().height;
+        const move = ev => {
+            const h = Math.max(120, Math.min(window.innerHeight - 160, height + start - ev.clientY));
+            dock.style.setProperty('--dock-height', `${h}px`);
+        };
+        const up = () => {
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', up);
+            store('dock-height', dock.style.getPropertyValue('--dock-height'));
+            if (state.dockTerm) state.dockTerm.refit();
+        };
+        if ($('#dock').classList.contains('collapsed')) toggleDock(true);
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+    });
+    if (store('dock-height')) $('#dock').style.setProperty('--dock-height', store('dock-height'));
+    if (store('dock-collapsed')) {
+        $('#dock').classList.add('collapsed');
+        $('#dock-toggle').textContent = '▸';
+        $('#dock-toggle').setAttribute('aria-expanded', 'false');
+    }
+
+    async function openSessions() {
+        const pop = $('#sessions-pop');
+        pop.hidden = !pop.hidden;
+        if (pop.hidden) return;
+        try {
+            const { orphans } = await api('GET', '/api/sessions');
+            $('#sessions-orphans').hidden = !orphans.length;
+            $('#sessions-orphans').textContent = orphans.length
+                ? `tmux also has ${orphans.join(', ')}, which the board did not start or has forgotten.` : '';
+        } catch (e) { fail(e); }
+    }
+    $('#sessions-btn').addEventListener('click', e => { e.stopPropagation(); openSessions(); });
+    $('#attention').addEventListener('click', e => { e.stopPropagation(); openSessions(); });
+    $('#sessions-list').addEventListener('click', e => {
+        const row = e.target.closest('li[data-id]');
+        const s = row && state.board.sessions.find(x => x.id === Number(row.dataset.id));
+        if (s) showSession(s);
+    });
+    document.addEventListener('click', e => {
+        if (!$('#sessions-pop').hidden && !e.target.closest('#sessions-pop')) $('#sessions-pop').hidden = true;
+    });
+    $('#notify').checked = store('notify') === '1' && window.Notification && Notification.permission === 'granted';
+    $('#notify').addEventListener('change', async e => {
+        if (e.target.checked && window.Notification && Notification.permission !== 'granted') {
+            e.target.checked = (await Notification.requestPermission()) === 'granted';
+        }
+        store('notify', e.target.checked ? '1' : '');
+    });
+
+    // Live updates. Each event arrives as `kanban`; a batch that changed the board also sends `change`, and the
+    // board and the open task are re-read. Session and message events update what shows agents.
+    let pending = null, pendingBoard = null, pendingActivity = null;
     function connect() {
         const source = new EventSource('/api/events');
-        source.onopen = () => { $('#live').classList.add('on'); $('#live').title = 'Live: following file and database changes'; };
+        source.onopen = () => { $('#live').classList.add('on'); $('#live').title = 'Live: following the board, its files and its agents'; };
         source.onerror = () => { $('#live').classList.remove('on'); $('#live').title = 'Disconnected; retrying'; };
         source.addEventListener('change', () => {
             clearTimeout(pending);
             pending = setTimeout(() => { loadBoard().catch(fail); refreshTask(); }, 100);
         });
+        source.addEventListener('kanban', msg => {
+            let e;
+            try { e = JSON.parse(msg.data); } catch { return; }
+            if (e.type.startsWith('session.')) {
+                clearTimeout(pendingBoard);
+                pendingBoard = setTimeout(() => { loadBoard().then(refreshTask).catch(fail); }, 150);
+                if (e.type === 'session.waiting') announceWaiting(e);
+            }
+            if (state.task && e.task_id === state.task.id) {
+                clearTimeout(pendingActivity);
+                pendingActivity = setTimeout(loadActivity, 150);
+            }
+        });
     }
 
+    api('GET', '/api/capabilities').then(caps => {
+        state.caps = caps;
+        const options = caps.profiles.map(p => `<option value="${esc(p.name)}"${p.name === caps.defaultProfile ? ' selected' : ''}>${esc(p.label)}</option>`).join('');
+        $('#dock-profile').innerHTML = options;
+        $('#d-agent-profile').innerHTML = options;
+        renderSessions();
+        renderAgent();
+    }).catch(fail);
     loadBoard().then(() => {
         const id = Number(location.hash.slice(1));
         if (id) openTask(id);

@@ -2,15 +2,24 @@
     "name": "agent-kanban",
     "version": "0.1.0",
     "private": true,
-    "description": "Kanban feature tracker: markdown task files with status and metadata in SQLite.",
+    "description": "Kanban feature tracker and agent orchestration board: markdown task files with status and metadata in SQLite, and agent sessions in tmux.",
     "bin": {
         "kanban": "kanban.js"
     },
     "scripts": {
         "board": "node kanban.js board",
-        "serve": "node kanban.js serve --open"
+        "serve": "node kanban.js serve --open",
+        "test": "node --test test/*.test.js"
     },
     "engines": {
         "node": ">=22.13"
+    },
+    "dependencies": {
+        "@xterm/addon-fit": "^0.10.0",
+        "@xterm/xterm": "^5.5.0",
+        "ws": "^8.18.0"
+    },
+    "optionalDependencies": {
+        "node-pty": "^1.0.0"
     }
 }

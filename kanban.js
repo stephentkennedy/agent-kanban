@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { Store, KanbanError, PRIORITIES, TYPES } = require('./lib/store');
+const { describe } = require('./lib/describe');
 
 const HELP = `kanban - feature tracker
 
@@ -39,7 +40,29 @@ Columns
   kanban columns [--json]
   kanban column add <key> [--label <l>] [--kind queue|active|done] [--wip <n>] [--after <col>]
   kanban column set <key> [--label <l>] [--kind <k>] [--wip <n|0>] [--rename <key>] [--position <n>]
+                          [--sort manual|attention]
   kanban column rm <key> [--to <col>]
+
+Agents
+  kanban whoami [--json]             Who this command acts as, and its session, task and worktree
+  kanban claim <task> [--force]      Mark a task as yours / kanban release <task> [--force]
+  kanban post <task> <message>       A note on a task, for its agent, the orchestrator and the board
+  kanban send <session> <message>    A message to one session (a name, orchestrator, or task:<n>)
+  kanban inbox [--peek] [--wait <s>] [--json]   Your session's new events (marks them read)
+  kanban subscribe <task|board> [--types a.,b]  / unsubscribe <task|board> / subscriptions
+  kanban events [--task <t>] [--after <id>] [--follow] [--json]   Everything that happened
+  kanban profiles [--json]           The terminal tools sessions can run (kanban.config.json)
+
+Sessions (each runs in tmux; a task session gets its own git worktree and branch)
+  kanban session list [--all] [--attention] [--json]
+  kanban session spawn <task> [--profile <p>] [--force]
+  kanban session spawn --orchestrator [--profile <p>]
+  kanban session attach <s> [--ro]   Open it in this terminal (detach: close the terminal)
+  kanban session peek <s> [--lines <n>]   Print what is on its screen
+  kanban session send <s> <text> [--no-enter]
+  kanban session nudge <s>           Type the profile's reminder to check the inbox
+  kanban session resume <s>
+  kanban session kill <s> [--worktree keep|remove|force]
 
 Housekeeping
   kanban sync                        Reconcile kanban.db with tasks/ and report
@@ -51,9 +74,11 @@ Housekeeping
 
   Priorities: ${PRIORITIES.join(', ')}
   Types:      ${TYPES.join(', ')}
-  --home <dir> (or KANBAN_HOME) uses another tracker directory.`;
+  --home <dir> (or KANBAN_HOME) uses another tracker directory.
+  Changes are recorded as made by "cli", or by the session in KANBAN_SESSION, or by KANBAN_ACTOR.`;
 
-const BOOLEAN = new Set(['json', 'all', 'edit', 'open', 'keep-file', 'top', 'help', 'missing', 'stage', 'quiet']);
+const BOOLEAN = new Set(['json', 'all', 'edit', 'open', 'keep-file', 'top', 'help', 'missing', 'stage', 'quiet',
+    'peek', 'follow', 'orchestrator', 'force', 'no-enter', 'attention', 'resume', 'ro']);
 
 function parseArgs(argv) {
     const pos = [], opts = {};
@@ -206,7 +231,7 @@ const commands = {
         console.log(c.bold(`#${t.id} ${t.title}`));
         for (const h of store.history(t.id)) {
             const change = h.old == null ? `→ ${h.new}` : `${h.old} → ${h.new ?? ''}`;
-            console.log(`  ${c.grey(when(h.at))}  ${h.field.padEnd(8)} ${change}`);
+            console.log(`  ${c.grey(when(h.at))}  ${h.field.padEnd(8)} ${change}${h.actor ? c.grey(`  (${h.actor})`) : ''}`);
         }
     },
 
@@ -262,13 +287,14 @@ const commands = {
         const col = store.column(t.status);
         if (t.status === status) {
             console.log(`#${t.id} is already in ${col.label}.`);
-            return;
+            return claimIfAgent(store, t.id);
         }
         if (col.kind !== 'queue') {
             console.log(`#${t.id} is already in ${col.label}; left it there. To move it back: kanban move ${t.id} ${status}`);
-            return;
+        } else {
+            report(store, store.move(t.id, status), status);
         }
-        report(store, store.move(t.id, status), status);
+        claimIfAgent(store, t.id);
     },
 
     done(store, [ref]) {
@@ -306,7 +332,8 @@ const commands = {
         if (opts.json) return json(cols);
         for (const col of cols) {
             const limit = col.wip_limit ? `  wip ${col.wip_limit}` : '';
-            console.log(`${col.key.padEnd(12)} ${col.label.padEnd(16)} ${c.grey(col.kind.padEnd(6))} ${c.grey(col.count + ' task(s)')}${c.grey(limit)}`);
+            const sort = col.sort !== 'manual' ? `  sort ${col.sort}` : '';
+            console.log(`${col.key.padEnd(12)} ${col.label.padEnd(16)} ${c.grey(col.kind.padEnd(6))} ${c.grey(col.count + ' task(s)')}${c.grey(limit + sort)}`);
         }
     },
 
@@ -318,7 +345,7 @@ const commands = {
         } else if (action === 'set') {
             store.updateColumn(key, {
                 label: opts.label, kind: opts.kind, wip_limit: wip(opts.wip), rename: opts.rename,
-                position: opts.position !== undefined ? Number(opts.position) - 1 : undefined,
+                position: opts.position !== undefined ? Number(opts.position) - 1 : undefined, sort: opts.sort,
             });
         } else if (action === 'rm') {
             store.removeColumn(key, { moveTo: opts.to });
@@ -341,6 +368,12 @@ const commands = {
     export(store, pos, opts, syncReport) {
         // The store's own transaction has already written kanban.jsonl; this only reports and stages it.
         if (opts.stage) {
+            // Committing in another checkout (an agent's worktree) must not stage this one's kanban.jsonl.
+            const top = dir => spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8' }).stdout.trim();
+            if (top(process.cwd()) !== top(store.home)) {
+                if (!opts.quiet) console.log(`${store.exportPath} belongs to another checkout; not staging it.`);
+                return;
+            }
             const r = spawnSync('git', ['add', '--', path.basename(store.exportPath)], { cwd: store.home, stdio: 'inherit' });
             if (r.status !== 0) throw new KanbanError('git add kanban.jsonl failed.');
         }
@@ -369,8 +402,12 @@ const commands = {
             '# >>> kanban',
             `# Brings ${home}/kanban.jsonl, the committed form of kanban.db, up to date and stages it.`,
             '# It stops the commit only when the board cannot be read (for example, conflict markers left in kanban.jsonl).',
-            'if command -v node >/dev/null 2>&1; then',
-            `    node "${script}" export --stage --quiet || { echo "kanban: fix the problem above, or commit with --no-verify" >&2; exit 1; }`,
+            '# A checkout without kanban.jsonl (a kanban agent\'s worktree leaves the tracker\'s files out) is skipped,',
+            '# and KANBAN_HOME is cleared so an agent\'s session never stages the main checkout\'s board.',
+            `if [ ! -f "${home ? home + '/' : ''}kanban.jsonl" ]; then`,
+            '    :',
+            'elif command -v node >/dev/null 2>&1; then',
+            `    KANBAN_HOME= KANBAN_SESSION= node "${script}" export --stage --quiet || { echo "kanban: fix the problem above, or commit with --no-verify" >&2; exit 1; }`,
             'else',
             '    echo "kanban: node not found; kanban.jsonl was not refreshed" >&2',
             'fi',
@@ -402,7 +439,204 @@ const commands = {
         const { serve } = require('./lib/server');
         serve(store, { port: opts.port ? Number(opts.port) : 4477, open: opts.open });
     },
+
+    /* ---------- agents ---------- */
+
+    whoami(store, pos, opts) {
+        const s = store.session != null ? store.sessionOf(store.session) : null;
+        const info = {
+            actor: store.actor, home: store.home,
+            session: s && { id: s.id, name: s.name, role: s.role, profile: s.profile, status: s.status },
+            task: s && s.task_id, worktree: s && s.worktree, branch: s && s.branch,
+            claims: store.db.prepare('SELECT task_id FROM claims WHERE actor = ?').all(store.actor).map(r => r.task_id),
+        };
+        if (opts.json) return json(info);
+        console.log(`${c.bold(info.actor)}  ${c.grey(store.home)}`);
+        if (s) {
+            console.log(`session  ${s.name} (${s.role}, ${s.profile}) ${statusText(s)}`);
+            if (s.task_id != null) console.log(`task     #${s.task_id}  ${c.grey(store.get(s.task_id, { body: false }).path)}`);
+            if (s.worktree) console.log(`worktree ${s.worktree}  ${c.grey('branch ' + s.branch)}`);
+        }
+        if (info.claims.length) console.log(`claims   ${info.claims.map(id => '#' + id).join(', ')}`);
+    },
+
+    claim(store, [ref], opts) {
+        const claim = store.claim(need(ref, 'a task'), { force: opts.force });
+        console.log(`#${claim.task_id} is claimed by ${claim.actor}.`);
+    },
+
+    release(store, [ref], opts) {
+        const id = store.resolve(need(ref, 'a task'));
+        console.log(store.release(id, { force: opts.force }) ? `Released #${id}.` : `#${id} was not claimed.`);
+    },
+
+    post(store, [ref, ...words]) {
+        const id = store.resolve(need(ref, 'a task'));
+        store.post(id, need(words.join(' ').trim() || undefined, 'a message'));
+        console.log(`Posted on #${id}.`);
+    },
+
+    send(store, [ref, ...words]) {
+        const target = store.sessionOf(need(ref, 'a session'));
+        store.send(target.id, need(words.join(' ').trim() || undefined, 'a message'));
+        console.log(`Sent to ${target.name}.`);
+    },
+
+    async inbox(store, pos, opts) {
+        const s = mySession(store, opts);
+        const read = () => store.inbox(s.id, { advance: !opts.peek, limit: opts.limit ? Number(opts.limit) : 50 });
+        let events = read();
+        for (const until = Date.now() + Number(opts.wait || 0) * 1000; !events.length && Date.now() < until;) {
+            await new Promise(r => setTimeout(r, 1000));
+            events = read();
+        }
+        if (opts.json) return json(events);
+        if (!events.length) return console.log(c.grey('Nothing new.'));
+        events.forEach(e => console.log((e.actionable ? c.yellow('! ') : '  ') + describe(e)));
+    },
+
+    subscribe(store, [target], opts) {
+        const s = mySession(store, opts);
+        const sub = store.subscribe(s.id, { task: need(target, 'a task or "board"'), types: opts.types });
+        console.log(`${s.name} follows ${sub.task_id ? '#' + sub.task_id : 'the board'}${sub.types ? ` (${sub.types})` : ''}.`);
+    },
+
+    unsubscribe(store, [target], opts) {
+        const s = mySession(store, opts);
+        const n = store.unsubscribe(s.id, opts.id !== undefined ? { id: Number(opts.id) } : { task: need(target, 'a task or "board"') });
+        console.log(n ? 'Unsubscribed.' : 'There was no such subscription.');
+    },
+
+    subscriptions(store, pos, opts) {
+        const s = mySession(store, opts);
+        const subs = store.subscriptions(s.id);
+        if (opts.json) return json(subs);
+        if (!subs.length) return console.log(c.grey('No subscriptions.'));
+        subs.forEach(x => console.log(`${String(x.id).padEnd(4)} ${x.task_id ? '#' + x.task_id : 'board'}  ${c.grey(x.types || 'all events')}`));
+    },
+
+    async events(store, pos, opts) {
+        let after = Number(opts.after || 0);
+        const task = opts.task;
+        const limit = Number(opts.limit || 50);
+        const print = list => {
+            if (opts.json) list.forEach(e => console.log(JSON.stringify(e)));
+            else list.forEach(e => console.log(describe(e)));
+            if (list.length) after = list[list.length - 1].id;
+        };
+        print(store.events({ after, task, limit, latest: !opts.after }));
+        while (opts.follow) {
+            await new Promise(r => setTimeout(r, 1000));
+            print(store.events({ after, task, limit: 500 }));
+        }
+    },
+
+    profiles(store, pos, opts) {
+        const cfg = require('./lib/config').load(store.home);
+        if (opts.json) return json(cfg.profiles);
+        for (const p of Object.values(cfg.profiles)) {
+            console.log(`${p.name.padEnd(10)} ${p.label || ''} ${c.grey(p.command)}${p.name === cfg.defaultProfile ? c.green('  (default)') : ''}`);
+        }
+    },
+
+    session(store, [action, ref, ...rest], opts) {
+        const sessions = require('./lib/sessions');
+        const show = s => console.log(sessionLine(s));
+        switch (action) {
+            case undefined:
+            case 'list':
+            case 'ls': {
+                let list = store.sessions({ live: !opts.all });
+                if (opts.attention) list = list.filter(s => s.attention).sort(sessions.byAttention);
+                if (opts.json) return json(list);
+                if (!list.length) return console.log(c.grey(opts.all ? 'No sessions.' : 'No live sessions. --all shows ended ones.'));
+                return list.forEach(show);
+            }
+            case 'spawn':
+            case 'start': {
+                const s = sessions.spawnSession(store, {
+                    role: opts.orchestrator ? 'orchestrator' : 'task', task: ref, profile: opts.profile, force: opts.force,
+                });
+                show(s);
+                if (s.worktree) console.log(c.grey(`  worktree ${s.worktree} on ${s.branch}`));
+                return console.log(c.grey(`  kanban session attach ${s.name}   to open it here`));
+            }
+            case 'attach': {
+                sessions.requireTmux();
+                const s = store.sessionOf(need(ref, 'a session'));
+                const [cmd, args] = sessions.attachCommand(store.home, s, { readOnly: opts.ro });
+                const env = { ...process.env };
+                delete env.TMUX;
+                spawnSync(cmd, args, { stdio: 'inherit', env });
+                return;
+            }
+            case 'peek':
+                return console.log(sessions.peek(store, need(ref, 'a session'), { lines: opts.lines }));
+            case 'send': {
+                const s = sessions.send(store, need(ref, 'a session'), rest.join(' '), { enter: !opts['no-enter'] });
+                return console.log(`Typed into ${s.name}.`);
+            }
+            case 'nudge':
+                return console.log(`Nudged ${sessions.nudge(store, need(ref, 'a session')).name}.`);
+            case 'resume':
+            case 'restart':
+                return show(sessions.resume(store, need(ref, 'a session')));
+            case 'kill':
+            case 'stop': {
+                const s = sessions.kill(store, need(ref, 'a session'), { worktree: opts.worktree || 'keep' });
+                show(s);
+                if (s.worktreeRemoved) console.log(c.grey(`  removed ${s.worktree}`));
+                return;
+            }
+            default:
+                throw new KanbanError(`Unknown session action "${action}". See \`kanban help\`.`);
+        }
+    },
 };
+
+function statusText(s) {
+    const color = { busy: c.cyan, idle: c.yellow, waiting: c.red, exited: c.grey, lost: c.red, starting: c.grey }[s.status] || (x => x);
+    const label = s.status === 'waiting' ? 'needs input' : s.status === 'exited' && s.exit_code ? `exited ${s.exit_code}` : s.status;
+    return color(label);
+}
+
+function sessionLine(s) {
+    const task = s.task_id != null ? `#${s.task_id}` : s.role;
+    const since = s.attention_since ? c.grey(` since ${when(s.attention_since)}`) : '';
+    return `${s.name.padEnd(18)} ${statusText(s).padEnd(useColor ? 21 : 12)} ${task.padEnd(13)} ${c.grey(s.profile)}${since}`
+        + (s.status_reason ? c.grey(`\n${' '.repeat(19)}${s.status_reason}`) : '');
+}
+
+// The session a command such as inbox acts for: --session, or the one this command runs in.
+function mySession(store, opts) {
+    if (opts.session !== undefined) return store.sessionOf(opts.session);
+    if (store.session != null) return store.sessionOf(store.session);
+    throw new KanbanError('That belongs to a session: run it inside one the board started, or pass --session <name>.');
+}
+
+function claimIfAgent(store, id) {
+    if (!store.actor.startsWith('agent:')) return;
+    try {
+        store.claim(id);
+    } catch (e) {
+        if (!(e instanceof KanbanError)) throw e;
+        console.error(c.yellow(e.message));
+    }
+}
+
+// Who a command acts as: the session the board started it in, or KANBAN_ACTOR, or "cli".
+function identify(store) {
+    if (process.env.KANBAN_SESSION) {
+        try {
+            const s = store.sessionOf(process.env.KANBAN_SESSION);
+            store.actor = `agent:${s.name}`;
+            store.session = s.id;
+            return;
+        } catch { /* a session from another tracker, or one that has been forgotten */ }
+    }
+    const actor = process.env.KANBAN_ACTOR;
+    if (actor && /^[\w.:@-]{1,80}$/.test(actor)) store.actor = actor;
+}
 
 commands.ls = commands.list;
 commands.new = commands.add;
@@ -438,23 +672,35 @@ function main() {
     const name = pos.shift() || 'board';
     if (opts.help || name === 'help') return console.log(HELP);
     if (name === 'merge-driver') return mergeDriver(pos);
+    const home = opts.home || process.env.KANBAN_HOME || __dirname;
+    // Hooks run on every tool call of an agent, and the launcher runs for a session's whole life: neither
+    // syncs the board first.
+    if (name === 'hook') return require('./lib/hooks').run(pos[0], { home, session: opts.session });
+    if (name === 'session' && pos[0] === 'exec') return require('./lib/sessions').exec(new Store(home), need(pos[1], 'a session id'), { resume: opts.resume });
     const command = commands[name];
     if (!command) throw new KanbanError(`Unknown command "${name}". See \`kanban help\`.`);
 
-    const store = new Store(opts.home || process.env.KANBAN_HOME || __dirname);
+    const store = new Store(home);
+    identify(store);
     const syncReport = store.sync();
     if (name !== 'sync' && name !== 'import' && !opts.json && !opts.quiet) {
         const lines = printReport(syncReport);
         if (lines.length) console.error(c.grey(lines.join('\n')));
     }
-    command(store, pos, opts, syncReport);
+    const result = command(store, pos, opts, syncReport);
+    if (result && result.then) return result.then(() => store.close());
     if (name !== 'serve') store.close();
 }
 
-try {
-    main();
-} catch (e) {
+function fatal(e) {
     if (!(e instanceof KanbanError)) throw e;
     console.error(c.red(e.message));
     process.exit(1);
+}
+
+try {
+    const result = main();
+    if (result && result.catch) result.catch(fatal);
+} catch (e) {
+    fatal(e);
 }

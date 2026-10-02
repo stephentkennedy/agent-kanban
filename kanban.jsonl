@@ -1,0 +1,6 @@
+{"kanban":1,"note":"Generated from kanban.db; kanban reloads it when it changes. Tasks are in tasks/."}
+{"column":"backlog","label":"Backlog","kind":"queue","wip":null}
+{"column":"todo","label":"To do","kind":"queue","wip":null}
+{"column":"doing","label":"In progress","kind":"active","wip":3,"sort":"attention"}
+{"column":"review","label":"Review","kind":"active","wip":null,"sort":"attention"}
+{"column":"done","label":"Done","kind":"done","wip":null}

@@ -39,7 +39,8 @@ of the start of the file name to be unambiguous (`kanban show dark`).
 | Hand off for review | `kanban move 4 review` |
 | Re-prioritise / retag | `kanban set 4 --priority high --tag +api,-ui` (`--tags a,b` replaces all) |
 | Rename | `kanban set 4 --title "Better name"` (rewrites the file's `# ` heading) |
-| What happened | `kanban history 4` |
+| What happened | `kanban history 4` (who did it, too) |
+| Who's on it / notes | `kanban claim 4`, `kanban post 4 "text"`, `kanban events --task 4` |
 
 Columns (`kanban columns`): `backlog` and `todo` are kind **queue** (not started), `doing` (In
 progress) and `review` are kind **active** (under way), `done` is kind **done**. A WIP limit (In
@@ -167,6 +168,27 @@ append implementation notes, move it to Review, never to Done. Check its notes w
 `node tools/kanban/kanban.js serve --open` serves the board at http://127.0.0.1:4477/ (`/#12` opens a
 task). It's for the user to look at. You should use the CLI, not the GUI, and don't leave a server
 running unless the user asked for one.
+
+## Sessions the board started
+
+If `KANBAN_SESSION` is set, the board started you in a terminal the user can see, and your system prompt
+says how to work with it. In short:
+
+- `kanban` is on your PATH and points at the main tracker (`KANBAN_HOME`); use it rather than the path
+  above. `kanban whoami` says who you are, your task, your worktree and your branch.
+- A task agent works in its own git worktree and branch. The worktree has no copy of the tracker's
+  task files: edit the task file by its absolute path (`kanban path <n>`). Commit only your code, on
+  your branch; never merge it, and never commit `kanban.jsonl` or `tasks/`.
+- New board events arrive as context, or as a `[kanban]` nudge typed into your terminal. Run
+  `kanban inbox` to read them. `task.user_changed` means the user edited your task: re-read it.
+- `kanban post <n> "<text>"` adds a note to a task (the user and the orchestrator see it);
+  `kanban send <session|orchestrator|task:N> "<text>"` messages one session.
+- The orchestrator (`role: orchestrator`) starts agents with `kanban session spawn <n>`, reads an
+  agent's screen with `kanban session peek <s>`, answers with `kanban session send <s> "<text>"`, and
+  lists who needs the user with `kanban session list --attention`.
+
+An agent the board did not start can still say who it is: `KANBAN_ACTOR=agent:<name> kanban …` records
+its changes as its own instead of `cli`, and `kanban claim <n>` marks the task as in hand.
 
 ## Trying things out
 
