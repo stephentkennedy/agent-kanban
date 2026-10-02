@@ -1,0 +1,6 @@
+node_modules/
+# The database is rebuilt from the committed kanban.jsonl
+kanban.db
+kanban.db-journal
+.kanban.jsonl.*.tmp
+tasks/.*.tmp

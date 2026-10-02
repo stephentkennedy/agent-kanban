@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kanban</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="topbar">
+        <h1>Kanban</h1>
+        <div class="filters">
+            <input id="search" type="search" placeholder="Search  /" aria-label="Search tasks">
+            <select id="filter-type" aria-label="Filter by type"><option value="">All types</option></select>
+            <select id="filter-priority" aria-label="Filter by priority"><option value="">All priorities</option></select>
+            <select id="filter-tag" aria-label="Filter by tag"><option value="">All tags</option></select>
+            <label class="toggle"><input id="show-archived" type="checkbox"> Archived</label>
+        </div>
+        <button id="new-task" class="primary" title="New task (n)">New task</button>
+        <span id="live" class="live" title="Live updates"></span>
+    </header>
+
+    <main id="board" class="board" aria-label="Board"></main>
+
+    <aside id="drawer" class="drawer" hidden aria-label="Task">
+        <div class="drawer-head">
+            <span id="d-id" class="task-id"></span>
+            <input id="d-title" class="title-input" aria-label="Title">
+            <button id="d-close" class="icon" title="Close (Esc)" aria-label="Close">&times;</button>
+        </div>
+        <div id="d-conflict" class="banner" hidden></div>
+        <div class="meta">
+            <label>Status <select id="d-status"></select></label>
+            <label>Priority <select id="d-priority"></select></label>
+            <label>Type <select id="d-type"></select></label>
+            <label class="wide">Tags <input id="d-tags" placeholder="comma, separated" list="tag-list"></label>
+            <datalist id="tag-list"></datalist>
+        </div>
+        <div class="file-row">
+            <code id="d-path"></code>
+            <button id="d-open" title="Open the markdown file (set KANBAN_OPEN to choose the program)">Open file</button>
+        </div>
+        <div class="tabs" role="tablist">
+            <button role="tab" data-tab="preview" aria-selected="true">Preview</button>
+            <button role="tab" data-tab="edit" aria-selected="false">Edit</button>
+            <span class="spacer"></span>
+            <span id="d-progress" class="progress-label"></span>
+        </div>
+        <div id="d-preview" class="md"></div>
+        <div id="d-edit" class="editor" hidden>
+            <textarea id="d-body" spellcheck="true" aria-label="Markdown"></textarea>
+            <div class="editor-actions">
+                <span class="hint">Ctrl+S saves</span>
+                <button id="d-revert">Revert</button>
+                <button id="d-save" class="primary">Save</button>
+            </div>
+        </div>
+        <details class="history">
+            <summary>History</summary>
+            <ol id="d-history"></ol>
+        </details>
+        <div class="drawer-foot">
+            <span id="d-dates" class="dates"></span>
+            <button id="d-archive"></button>
+            <button id="d-delete" class="danger">Delete</button>
+        </div>
+    </aside>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+
+    <script src="markdown.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

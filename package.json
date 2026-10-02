@@ -1,0 +1,16 @@
+{
+    "name": "agent-kanban",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Kanban feature tracker: markdown task files with status and metadata in SQLite.",
+    "bin": {
+        "kanban": "kanban.js"
+    },
+    "scripts": {
+        "board": "node kanban.js board",
+        "serve": "node kanban.js serve --open"
+    },
+    "engines": {
+        "node": ">=22.13"
+    }
+}
